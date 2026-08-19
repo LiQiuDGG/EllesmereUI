@@ -1,0 +1,43 @@
+# Fork-only test build. Upstream releases on tag push via .github/workflows/release.yml,
+# which uploads to CurseForge and Wago using secrets this fork does not have. This one
+# just packages a branch into a zip and attaches it to the run, so a work-in-progress
+# branch can be installed and tested before it is ever proposed upstream.
+#
+# This file must stay on main. Keeping it off feature branches keeps it out of PR diffs.
+name: Fork Test Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch or tag to build
+        required: true
+        default: feature/bag-bank-column-count
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # -d skips every upload, so no CurseForge or Wago token is needed.
+      - uses: BigWigsMods/packager@6d50adb6e8517eefef63f4afb16a6518166a6b28 # v2.5.1
+        with:
+          args: -d
+
+      - name: Name the build after the branch
+        run: echo "SLUG=$(echo '${{ inputs.ref }}' | tr '/' '-')" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: EllesmereUI-${{ env.SLUG }}
+          path: .release/*.zip
+          if-no-files-found: error
+          retention-days: 30
