@@ -29,7 +29,7 @@ local SIDEBAR_W_COLLAPSED = 32
 local SIDEBAR_BTN_H   = 26
 local SIDEBAR_ICON_SIZE = 18
 local SIDEBAR_PAD = 2
-local COLUMNS     = 14
+local COLUMNS     = 14 -- default; re-read from the profile before each layout pass
 local FIXED_H     = 500
 local SCROLLBAR_W = 4
 local SCROLLBAR_HIT_W = 16
@@ -1605,6 +1605,7 @@ end
 --  Refresh
 -------------------------------------------------------------------------------
 function EUI_Bank:RefreshBank()
+    COLUMNS = BP().bankColumns or 14
     if not EUI_Bank:IsVisible() then return end
     NotifyBankTypeForTSM()
 
@@ -2393,6 +2394,7 @@ eventFrame:SetScript("OnEvent", function(_, event)
             end
         end
         -- Set initial size so frame is visible immediately
+        COLUMNS = BP().bankColumns or 14
         local gridW = COLUMNS * (SLOT_SIZE + SPACING)
         EUI_Bank:SetWidth(GetBankSidebarWidth() + gridW + 10 * 2 + SCROLLBAR_HIT_W + 2)
         EUI_Bank:SetHeight(FIXED_H)
