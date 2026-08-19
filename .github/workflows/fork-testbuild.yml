@@ -43,10 +43,25 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+
+          # The packager writes into .release, a hidden directory. Fail loudly
+          # here rather than let a later step quietly find nothing.
+          shopt -s nullglob
+          zips=(.release/*.zip)
+          if [ ${#zips[@]} -eq 0 ]; then
+            echo "::error::packager produced no zip in .release/"
+            exit 1
+          fi
+          echo "Packaged: ${zips[*]}"
+
+          # GITHUB_SHA is the commit the workflow was dispatched from (main),
+          # not the branch we just checked out and built. Tag the built commit.
+          built_sha="$(git rev-parse HEAD)"
+
           gh release delete testbuild --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
-          gh release create testbuild .release/*.zip \
+          gh release create testbuild "${zips[@]}" \
             --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" \
+            --target "$built_sha" \
             --prerelease \
             --title "Test build: ${{ inputs.ref }}" \
-            --notes "Unofficial build of \`${{ inputs.ref }}\` for local testing. Not affiliated with upstream EllesmereUI. Built $(date -u '+%Y-%m-%d %H:%M UTC') from $(git rev-parse --short HEAD)."
+            --notes "Unofficial build of \`${{ inputs.ref }}\` at ${built_sha:0:8}, for local testing. Not affiliated with upstream EllesmereUI."
