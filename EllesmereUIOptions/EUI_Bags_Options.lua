@@ -81,7 +81,7 @@ initFrame:SetScript("OnEvent", function(self)
                       if _G.EUI_Bags then _G.EUI_Bags:SetScale(s) end
                       if _G.EUI_BagsReagent then _G.EUI_BagsReagent:SetScale(s) end
                       if _G.EUI_BagsWindow then _G.EUI_BagsWindow:SetScale(s) end
-                      if _G.EUI_Bank and _G.EUI_Bank:IsVisible() then _G.EUI_Bank:SetScale(s) end
+                      if _G.EUI_BankFrame and _G.EUI_BankFrame:IsVisible() then _G.EUI_BankFrame:SetScale(s) end
                   end },
                 { type="slider", text="Icon Zoom", min=0, max=0.20, step=0.01,
                   tooltip="Crops the border of every item icon in bags and bank. 0 shows the full icon.",
