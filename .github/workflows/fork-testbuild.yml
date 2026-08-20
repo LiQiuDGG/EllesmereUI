@@ -31,6 +31,17 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # Clear the rolling tag BEFORE packaging. The packager versions from the
+      # nearest tag, so leaving testbuild on the built commit makes every build
+      # after the first describe itself as "testbuild" instead of the release it
+      # is actually based on.
+      - name: Clear the previous testbuild tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete testbuild --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+          git tag -d testbuild 2>/dev/null || true
+
       # -d skips every upload, so no CurseForge or Wago token is involved.
       - uses: BigWigsMods/packager@6d50adb6e8517eefef63f4afb16a6518166a6b28 # v2.5.1
         with:
@@ -58,7 +69,6 @@ jobs:
           # not the branch we just checked out and built. Tag the built commit.
           built_sha="$(git rev-parse HEAD)"
 
-          gh release delete testbuild --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
           gh release create testbuild "${zips[@]}" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$built_sha" \
