@@ -498,6 +498,12 @@ local defaults = {
         raidMarkerPosition = "center",  -- "topleft", "top", "topright", "left", "center", "right", "bottomleft", "bottom"
         raidMarkerOffsetX  = 0,
         raidMarkerOffsetY  = 0,
+        -- Ping marker: the mark a group member's ping puts on the pinged unit's frame (Blizzard art, 30 = native size)
+        showPingMarker     = true,
+        pingMarkerSize     = 30,
+        pingMarkerPosition = "center",
+        pingMarkerOffsetX  = 0,
+        pingMarkerOffsetY  = 0,
         showReadyCheck   = true,
         showSummonPending = true,
         showIncomingRez  = true,
@@ -1391,44 +1397,65 @@ end
 -- death/resurrect transitions) stay in lockstep -- else a resurrect arriving only via UNIT_HEALTH
 -- strands the tint. Colors overridable via the Status Colors swatch in Extras; inline fallbacks
 -- allocate only when the DB key is missing. On ns (local cap).
-function ns._ApplyHealthBg(d, health, s, unit)
+function ns._ApplyHealthBg(d, health, s, unit, connected, deadOrGhost)
     local EllesmereUI = ns.EllesmereUI  -- upvalue read, not a global read (see taint note at top)
     local bg = d.bg
-    if not UnitIsConnected(unit) then
-        if bg then
-            local c = s.statusColorOffline or { r = 0x66/255, g = 0x66/255, b = 0x66/255 }
-            bg:ClearAllPoints(); bg:SetAllPoints(health)
-            bg:SetColorTexture(c.r, c.g, c.b, 1)
+    if connected == nil then connected = UnitIsConnected(unit) end
+    if deadOrGhost == nil then deadOrGhost = UnitIsDeadOrGhost(unit) end
+    -- Dead/offline: bg covers the FULL bar, fill dims. State+color stamped so
+    -- a repeated tick in the same state re-applies nothing; entering either
+    -- state clears the alive-path anchor/color stamps AND the fill-color
+    -- stamp in _UpdateButtonHealth (the tint here overwrote its work).
+    if not connected or deadOrGhost then
+        local c = (not connected) and (s.statusColorOffline or { r = 0x66/255, g = 0x66/255, b = 0x66/255 })
+            or (s.statusColorDead or { r = 0x24/255, g = 0x17/255, b = 0x17/255 })
+        local st = (not connected) and 3 or 2
+        if d._bgSt ~= st or d._bgR ~= c.r or d._bgG ~= c.g or d._bgB ~= c.b then
+            d._bgSt, d._bgR, d._bgG, d._bgB = st, c.r, c.g, c.b
+            d._bgTex, d._bgA = nil, nil
+            d._hcR = nil
+            if bg then
+                bg:ClearAllPoints(); bg:SetAllPoints(health)
+                bg:SetColorTexture(c.r, c.g, c.b, 1)
+            end
+            if health then
+                if st == 3 then health:SetStatusBarColor(0.3, 0.3, 0.3, 0.3)
+                else health:SetStatusBarColor(0.3, 0.3, 0.3, 0.5) end
+            end
         end
-        if health then health:SetStatusBarColor(0.3, 0.3, 0.3, 0.3) end
-        return
-    elseif UnitIsDeadOrGhost(unit) then
-        if bg then
-            local c = s.statusColorDead or { r = 0x24/255, g = 0x17/255, b = 0x17/255 }
-            bg:ClearAllPoints(); bg:SetAllPoints(health)
-            bg:SetColorTexture(c.r, c.g, c.b, 1)
-        end
-        if health then health:SetStatusBarColor(0.3, 0.3, 0.3, 0.5) end
         return
     end
     if not bg then return end
-    bg:ClearAllPoints()
-    -- The bg covers only MISSING health, so it hangs off the far side of the fill: the fill's
-    -- right edge normally, its top edge on a vertical bar. Axis read off the bar, no settings lookup.
-    if health.GetOrientation and health:GetOrientation() == "VERTICAL" then
-        bg:SetPoint("TOPLEFT", health, "TOPLEFT", 0, 0)
-        bg:SetPoint("BOTTOMRIGHT", health:GetStatusBarTexture(), "TOPRIGHT", 0, 0)
-    else
-        bg:SetPoint("TOPLEFT", health:GetStatusBarTexture(), "TOPRIGHT", 0, 0)
-        bg:SetPoint("BOTTOMRIGHT", health, "BOTTOMRIGHT", 0, 0)
+    -- Alive: the bg covers only MISSING health, so it hangs off the far side of the
+    -- fill: the fill's right edge normally, its top edge on a vertical bar. The
+    -- anchor set only changes when the fill texture object or the axis does, so it
+    -- is stamped instead of being re-cleared and re-set on every health tick.
+    local vert = health.GetOrientation and health:GetOrientation() == "VERTICAL"
+    local tex = health:GetStatusBarTexture()
+    if d._bgSt ~= 1 or d._bgTex ~= tex or d._bgVert ~= vert then
+        d._bgSt, d._bgTex, d._bgVert = 1, tex, vert
+        d._bgA = nil
+        bg:ClearAllPoints()
+        if vert then
+            bg:SetPoint("TOPLEFT", health, "TOPLEFT", 0, 0)
+            bg:SetPoint("BOTTOMRIGHT", tex, "TOPRIGHT", 0, 0)
+        else
+            bg:SetPoint("TOPLEFT", tex, "TOPRIGHT", 0, 0)
+            bg:SetPoint("BOTTOMRIGHT", health, "BOTTOMRIGHT", 0, 0)
+        end
     end
+    local br, bgr, bb, ba
     if s.healthColorMode == "dark" then
-        bg:SetColorTexture(EllesmereUI.GetDarkModeBg())
+        br, bgr, bb, ba = EllesmereUI.GetDarkModeBg()
     else
         -- Class-colored when bgClassColored, else custom (GetBgColor handles the secret-value
         -- guard + alpha = bgDarkness). MUST match the layout-pass and preview paths or this
         -- refresh clobbers the class-colored bg.
-        bg:SetColorTexture(ns.GetBgColor(unit, s))
+        br, bgr, bb, ba = ns.GetBgColor(unit, s)
+    end
+    if d._bgR ~= br or d._bgG ~= bgr or d._bgB ~= bb or d._bgA ~= ba then
+        d._bgR, d._bgG, d._bgB, d._bgA = br, bgr, bb, ba
+        bg:SetColorTexture(br, bgr, bb, ba)
     end
 end
 
@@ -1871,6 +1898,30 @@ local function GetPowerColor(unit)
     local info = PowerBarColor[pType]
     if info then return info.r, info.g, info.b end
     return 0.5, 0.5, 0.5
+end
+
+-- Power type + color + bounds (+ the opt-in power-colored bg) for a button's
+-- power bar: identity-class state that only moves on UNIT_DISPLAYPOWER, an
+-- occupant change or a full paint -- Blizzard's CompactUnitFrame recolors
+-- power on exactly those edges -- so the per-tick UNIT_POWER_UPDATE path pushes
+-- the value alone. Stamps d._pwType (nil = not derived for this occupant).
+-- force = full paint: settings may have changed, so the bg re-tints even when
+-- the type/darken stamps still match. On ns (200-local cap).
+ns._RFPowerTypeEdge = function(d, unit, force)
+    local pType = UnitPowerType(unit) or 0
+    local pr, pg, pb = GetPowerColor(unit)
+    d._pwType = pType
+    d.power:SetMinMaxValues(0, 100)
+    d.power:SetStatusBarColor(pr, pg, pb, 1)
+    local s = d._isParty and ns._scaledPartyProxy or (d._isExtra and ns._scaledExtraProxy) or ns._scaledProfile
+    if s.powerBgPowerColored and d.powerBg then
+        local f = ns.EllesmereUI.GetPowerBgDarkenFactor()
+        if force or d._pwBgTintType ~= pType or d._pwBgTintF ~= f then
+            d.powerBg:SetColorTexture(pr * f, pg * f, pb * f, (s.powerBgDarkness or 70) / 100)
+            d._pwBgTintType = pType
+            d._pwBgTintF = f
+        end
+    end
 end
 
 -------------------------------------------------------------------------------
@@ -2599,8 +2650,24 @@ local function UpdateAbsorb(button, unit)
     -- open to painting and poisons the memo for the next plain pass.
     local hpW, hpH = hp:GetWidth(), hp:GetHeight()
     local isSec = issecretvalue
-    if isSec and (isSec(absorbAmt) or isSec(maxHealth)
-       or isSec(healAbsorbAmt) or isSec(isClamped) or isSec(incomingHeals)) then
+    local anySec = isSec and (isSec(absorbAmt) or isSec(maxHealth)
+       or isSec(healAbsorbAmt) or isSec(isClamped) or isSec(incomingHeals))
+    -- Absorb-active lean flag: the health ride repaints absorbs ONLY while
+    -- this is set (clamp state can flip with health while shielded; with no
+    -- absorb, a health change alters nothing this function paints). Event
+    -- branches arm it; a fresh PLAIN all-zero read here disarms; secret reads
+    -- keep it armed (fail-open = today's always-paint behavior in combat).
+    ab._paintAt = GetTime()
+    if anySec then
+        if not d._absActive then ns._AbArm(button, unit, d) end
+    elseif (absorbAmt or 0) > 0 or (healAbsorbAmt or 0) > 0
+        or incomingHeals > 0 or isClamped == true then
+        if not d._absActive then ns._AbArm(button, unit, d) end
+    else
+        d._absActive = false
+        ns._abArmed[button] = nil
+    end
+    if anySec then
         ab._mAbs = nil
     elseif ab._mAbs == absorbAmt and ab._mHeal == healAbsorbAmt
        and ab._mMax == maxHealth and ab._mClamp == isClamped
@@ -2915,6 +2982,89 @@ end
 -------------------------------------------------------------------------------
 --  Debuff grid layout (shared by the live render and the options preview)
 -------------------------------------------------------------------------------
+-- Absorb paint coalescer (Blizzard's own CompactUnitFrame model: absorb /
+-- heal-prediction repaints are "frequent and expensive, update once per frame
+-- at most"). Event branches MARK; the flush paints each dirty button once,
+-- at most a budget of them per render frame -- server batches land several
+-- absorb-family events per button in one frame at raid scale, and only the
+-- last paint renders. The budget is the backstop for a genuine event storm
+-- (a raid-wide shield landing on everyone in one frame); the belt below
+-- spreads its own marks across ticks so it never fills the budget itself.
+-- The flush frame is hidden whenever the set is empty. On ns (200-local cap).
+ns._abDirty = {}
+ns._abFlushBudget = 20
+ns._abFlush = CreateFrame("Frame")
+ns._abFlush:Hide()
+ns._abFlush:SetScript("OnUpdate", function(self)
+    local dirty = ns._abDirty
+    local left = ns._abFlushBudget
+    for button in pairs(dirty) do
+        dirty[button] = nil
+        -- The button's CURRENT occupant, never the token captured at mark
+        -- time: a header reassignment between mark and flush would paint the
+        -- old occupant's absorb onto the new one.
+        local unit = button:GetAttribute("unit")
+        if unit then UpdateAbsorb(button, unit) end
+        left = left - 1
+        if left <= 0 then break end
+    end
+    -- Leftovers past the budget keep the frame shown for the next frame.
+    if next(dirty) == nil then self:Hide() end
+end)
+function ns._MarkAbsorbDirty(button, unit)
+    -- unit is kept for the callers' convenience; the flush re-reads the
+    -- button's current occupant itself.
+    ns._abDirty[button] = true
+    ns._abFlush:Show()
+end
+
+-- Armed-members belt: covers the ONE transition with no event at all -- an
+-- aura-granted shield expiring on its TIMER on an unhit, topped unit (VDH
+-- Infernal Strike field report; damaged/healed units correct instantly via
+-- the health/absorb events). One shared ticker exists only while some member
+-- is armed and cancels itself when the armed set empties. Zero event
+-- registrations, zero cost with no shields anywhere.
+--
+-- STAGGERED: the ticker runs at 0.1s and each tick visits one fifth of the
+-- armed set (members whose ordinal in the walk matches the tick's phase), so
+-- every member is still visited every 0.5s -- the accepted corner latency --
+-- but the marks land in five different render frames instead of one. A
+-- single 0.5s sweep re-marked the whole shielded roster at once, and because
+-- that painted them together their stamps aged together, locking the burst
+-- into a permanent 2 Hz rhythm no drain budget could break. Members painted
+-- within 0.45s (event-active) are still skipped by the stamp compare.
+-- Membership churn reshuffles the walk order harmlessly: a member is at worst
+-- visited twice in a row or waits one extra sweep once.
+ns._abArmed = ns._abArmed or {}
+ns._abBeltPhase = 0
+function ns._AbArm(button, unit, d)
+    d._absActive = true
+    ns._abArmed[button] = unit
+    if not ns._abBelt and C_Timer then
+        ns._abBelt = C_Timer.NewTicker(0.1, function()
+            local now = GetTime()
+            local phase = ns._abBeltPhase
+            ns._abBeltPhase = (phase + 1) % 5
+            local any = false
+            local i = 0
+            for btn, u in pairs(ns._abArmed) do
+                any = true
+                if i % 5 == phase then
+                    local ab = GetFFD(btn).absorbBar
+                    if not ab or (now - (ab._paintAt or 0)) > 0.45 then
+                        ns._MarkAbsorbDirty(btn, u)
+                    end
+                end
+                i = i + 1
+            end
+            if not any then
+                ns._abBelt:Cancel()
+                ns._abBelt = nil
+            end
+        end)
+    end
+end
+
 -- Effective icon size for dispellable debuffs routed to their own anchor ("Dispellable Debuff
 -- Location"): 0 = match the main Debuff Size. Reads scaled proxies transparently (the key is in
 -- INDICATOR_SCALE_KEYS; 0 scales to 0, so the match sentinel survives). On ns (200-local cap).
@@ -3130,6 +3280,11 @@ local function StyleButton(button)
     ns.RF_ApplyHealthOrientation(health, s)
     health:SetMinMaxValues(0, 100)
     health:SetValue(100)
+    -- Pre-paint tint: a StatusBar texture renders WHITE (default vertex
+    -- color) until the first content paint assigns the real class/reaction
+    -- color a few frames after login (the styling drain). Start dark so the
+    -- loading shell reads as calm empty frames instead of a flat white flash.
+    health:SetStatusBarColor(0.12, 0.12, 0.12)
     d.health = health
 
     -- Full-height anchor reference for Uniform Icon Anchoring: top tracks the health bar (so the
@@ -3157,6 +3312,8 @@ local function StyleButton(button)
         if PP then PP.DisablePixelSnap(power) end
         power:SetMinMaxValues(0, 1)
         power:SetValue(1)
+        -- Pre-paint tint (see the health bar note above).
+        power:SetStatusBarColor(0.12, 0.12, 0.12)
         local pwBg = power:CreateTexture(nil, "BACKGROUND")
         pwBg:SetAllPoints()
         pwBg:SetColorTexture((s.powerBgColor or {}).r or 0, (s.powerBgColor or {}).g or 0, (s.powerBgColor or {}).b or 0, (s.powerBgDarkness or 70) / 100)
@@ -3714,26 +3871,53 @@ local function StyleButton(button)
         if u and UnitExists(u) then
             -- Repaint + remap the instant the header (re)assigns this button, so a late assignment
             -- landing after the roster-timer rebuild can never leave it blank or route live events
-            -- to a stale button. Fires only for buttons whose unit changed, so bounded.
+            -- to a stale button.
             local d = GetFFD(self)
-            -- Fires even on a same-unit re-confirm (see the private-aura note above), so only drop
-            -- the power-hide cache on a genuine occupant change -- else it forces an unconditional
-            -- Show/Hide/SetHeight repaint, reintroducing the pop the deferred-power fix removed.
-            if d._lastUnit ~= u then
-                d._lastUnit = u
-                d._appliedHidePower = nil
-            end
             -- Extra Frames duplicates never enter the real routing maps (one button per unit);
-            -- XF_Apply owns ns._xfUnitToButton. The repaint/range/private-aura work below is 1:1.
+            -- XF_Apply owns ns._xfUnitToButton. The repaint/range work below is 1:1.
             if d._isExtra then
                 -- map owned by XF_Apply
             elseif d._isParty then ns._partyUnitToButton[u] = self
             else unitToButton[u] = self end
+            -- The secure header re-sets EVERY child's unit on EVERY re-process (each
+            -- roster/name event, each sort attribute change), so most fires are a
+            -- same-occupant re-confirm: same token AND same person as the last full
+            -- paint. Nothing on the button changed -- its own unit events kept it
+            -- current -- so only the routing write above and the container's
+            -- assist gate run; the roster timer refreshes roster-derived state
+            -- (leader/role/power layout) for unchanged occupants. A secret guid
+            -- (never memoized) or a cleared/unstyled button takes the full path.
+            local guid = UnitGUID(u)
+            if issecretvalue(guid) then guid = nil end
+            if guid and d._lastGuid == guid and d._lastUnit == u then
+                if ns.RFC_OnUnitAssigned then ns.RFC_OnUnitAssigned(self, d, u) end
+                return
+            end
+            -- Identity caches (class token, power type) drop on a real assignment:
+            -- a different person can land on this button under the same token, and
+            -- those derive again on the next tick for one cheap read each.
+            d._clsTok = nil
+            d._pwType = nil
+            -- Drop the power-hide cache only on a token change -- else it forces an
+            -- unconditional Show/Hide/SetHeight repaint, reintroducing the pop the
+            -- deferred-power fix removed.
+            if d._lastUnit ~= u then
+                d._lastUnit = u
+                d._appliedHidePower = nil
+            end
+            d._lastGuid = d.styled and guid or nil
+            -- A ping marker belongs to the previous occupant; its pin-removed edge
+            -- can no longer reach this button once the person moved.
+            if d.pingFrame then d.pingFrame:Hide() end
             -- Containers first: the legacy refresh below still has restriction-era failure modes,
             -- and an error there must not starve the container of its unit assignment.
             if ns.RFC_OnUnitAssigned then ns.RFC_OnUnitAssigned(self, d, u) end
             if ns._RefreshAssignedButton then ns._RefreshAssignedButton(self, u) end
             if ns._UpdateButtonRange then ns._UpdateButtonRange(u, self) end
+        else
+            -- Cleared (button hidden by the header) or not yet resolvable: forget the
+            -- painted occupant so the next assignment always takes the full path.
+            GetFFD(self)._lastGuid = nil
         end
     end)
 
@@ -3794,6 +3978,175 @@ ns._StyleButtonSecure = function(button)
     elseif ClickCastFrames then
         ClickCastFrames[button] = true
     end
+end
+
+-------------------------------------------------------------------------------
+--  Unit ping marker (parity with the default raid frames): when a group member
+--  is pinged, the marker Blizzard draws on its compact frame appears on that
+--  member's button here.
+--
+--  There is no direct channel: the pin events (UNIT_PING_PIN_ADDED / _REMOVED)
+--  are restricted (addon RegisterEvent = forbidden, like the combat log) and
+--  their only consumer template is forbidden to instantiate from addon code.
+--  What IS reachable: the ping icon frame Blizzard already built on each of
+--  its own compact frames is an ordinary object, and the raid module keeps
+--  those frames alive -- the container is parked off-screen but the manager
+--  still runs every roster layout through it (SetUpFrame fires per compact
+--  frame per roster event). Blizzard's handler resolves the pinned GUID to a
+--  frame and applies the showPingsOnRaidFrames CVar gate before it calls
+--  ShowPing / ClearPing on that icon, so a secure post-hook on those two
+--  methods hands us the texture kit and the owning compact frame's unit
+--  token; the token maps to our button(s) and the same atlases go on our own
+--  overlay. Hooks are installed per icon from a CompactUnitFrame_SetUpFrame
+--  post-hook (once per icon object; nameplate compact frames are skipped for
+--  good). Parity is total: same trigger, same CVar, same art. Zero work
+--  between pings; overlays are built on first use.
+--
+--  Blizzard's own icon never clears when the pinged person moves to another
+--  compact frame before the pin expires (the removed edge no longer matches
+--  that frame), so a mirror needs two belts: our unit hook hides the overlay
+--  on an occupant change, and a shown overlay expires on its own after the
+--  longest a pin can live.
+-------------------------------------------------------------------------------
+ns._pingHooked  = setmetatable({}, { __mode = "k" })  -- Blizzard icon -> true (hooked) / false (never)
+ns._pingLitBtn  = setmetatable({}, { __mode = "k" })  -- Blizzard icon -> our button it lit
+ns._pingLitXf   = setmetatable({}, { __mode = "k" })  -- Blizzard icon -> Extra Frames duplicate it lit
+ns.PING_EXPIRE  = 20
+
+-- Position + size from the (party/extra-aware) settings: the same 9-point
+-- anchor set as the raid marker, and the size as a factor of Blizzard's native
+-- 30 so both atlases keep their proportions. Re-run by every reload path that
+-- re-anchors the other indicators.
+ns._RFAnchorPing = function(d)
+    local pf = d.pingFrame
+    if not pf then return end
+    local s = d._isParty and ns._scaledPartyProxy or (d._isExtra and ns._scaledExtraProxy) or ns._scaledProfile
+    local size = PixelSnap(s.pingMarkerSize or 30)
+    pf:SetSize(size, size)
+    pf._factor = size / 30
+    local host = ns.RF_AnchorHost(d.health, s)
+    local pos = s.pingMarkerPosition or "center"
+    local ox = s.pingMarkerOffsetX or 0
+    local oy = s.pingMarkerOffsetY or 0
+    pf:ClearAllPoints()
+    if pos == "topleft" then
+        pf:SetPoint("TOPLEFT", host, "TOPLEFT", 2 + ox, -2 + oy)
+    elseif pos == "top" then
+        pf:SetPoint("TOP", host, "TOP", ox, -2 + oy)
+    elseif pos == "topright" then
+        pf:SetPoint("TOPRIGHT", host, "TOPRIGHT", -2 + ox, -2 + oy)
+    elseif pos == "left" then
+        pf:SetPoint("LEFT", host, "LEFT", 2 + ox, oy)
+    elseif pos == "right" then
+        pf:SetPoint("RIGHT", host, "RIGHT", -2 + ox, oy)
+    elseif pos == "bottomleft" then
+        pf:SetPoint("BOTTOMLEFT", host, "BOTTOMLEFT", 2 + ox, 2 + oy)
+    elseif pos == "bottom" then
+        pf:SetPoint("BOTTOM", host, "BOTTOM", ox, 2 + oy)
+    elseif pos == "bottomright" then
+        pf:SetPoint("BOTTOMRIGHT", host, "BOTTOMRIGHT", -2 + ox, 2 + oy)
+    else
+        pf:SetPoint("CENTER", host, "CENTER", ox, oy)
+    end
+end
+
+ns._RFPingOverlay = function(button, d)
+    local pf = d.pingFrame
+    if pf then return pf end
+    pf = CreateFrame("Frame", nil, button)
+    pf:SetFrameLevel(button:GetFrameLevel() + ns.LVL_MARKER + 1)
+    pf:EnableMouse(false)
+    pf.bg = pf:CreateTexture(nil, "BACKGROUND")
+    pf.bg:SetPoint("CENTER")
+    pf.icon = pf:CreateTexture(nil, "ARTWORK")
+    pf.icon:SetPoint("CENTER")
+    pf:Hide()
+    d.pingFrame = pf
+    ns._RFAnchorPing(d)
+    return pf
+end
+
+ns._RFPingHide = function(button)
+    if not button then return end
+    local d = GetFFD(button)
+    if d.pingFrame then d.pingFrame:Hide() end
+end
+
+-- Atlas at native size, then scaled by the configured factor (each texture
+-- keeps its own native proportions). On ns (200-local cap).
+ns._SetPingAtlas = function(tex, atlas, factor)
+    tex:SetAtlas(atlas, true)
+    if factor ~= 1 then
+        local w, h = tex:GetSize()
+        tex:SetSize(w * factor, h * factor)
+    end
+end
+
+ns._RFPingLight = function(button, kit)
+    local d = GetFFD(button)
+    local s = d._isParty and ns._scaledPartyProxy or (d._isExtra and ns._scaledExtraProxy) or ns._scaledProfile
+    if s.showPingMarker == false then return end
+    local pf = ns._RFPingOverlay(button, d)
+    local factor = pf._factor or 1
+    ns._SetPingAtlas(pf.bg, "Ping_Frame_BG_" .. kit, factor)
+    ns._SetPingAtlas(pf.icon, "Ping_Frame_" .. kit, factor)
+    pf:Show()
+    -- Expiry belt: a pin has a finite engine lifetime; if its removed edge can
+    -- no longer reach this button (see header), the overlay still goes away.
+    local stamp = (d._pingStamp or 0) + 1
+    d._pingStamp = stamp
+    C_Timer.After(ns.PING_EXPIRE, function()
+        if d._pingStamp == stamp and d.pingFrame then d.pingFrame:Hide() end
+    end)
+end
+
+ns._OnCufShowPing = function(icon, kit)
+    if issecretvalue(kit) or type(kit) ~= "string" then return end
+    local owner = icon:GetParent()
+    local unit = owner and owner.unit
+    if type(unit) ~= "string" then return end
+    local btn = unitToButton[unit] or ns._partyUnitToButton[unit]
+    local xf = ns._xfUnitToButton[unit]
+    -- The icon re-lit for a different occupant: release what it lit before.
+    local prevB, prevX = ns._pingLitBtn[icon], ns._pingLitXf[icon]
+    if prevB and prevB ~= btn then ns._RFPingHide(prevB) end
+    if prevX and prevX ~= xf then ns._RFPingHide(prevX) end
+    if btn then ns._RFPingLight(btn, kit) end
+    if xf then ns._RFPingLight(xf, kit) end
+    ns._pingLitBtn[icon], ns._pingLitXf[icon] = btn, xf
+end
+
+ns._OnCufClearPing = function(icon)
+    local b, x = ns._pingLitBtn[icon], ns._pingLitXf[icon]
+    if not b and not x then return end
+    ns._pingLitBtn[icon], ns._pingLitXf[icon] = nil, nil
+    ns._RFPingHide(b)
+    ns._RFPingHide(x)
+end
+
+ns._HookCufPingIcon = function(cuf)
+    local icon = cuf and cuf.pingIconFrame
+    if not icon then return end
+    local state = ns._pingHooked[icon]
+    if state ~= nil then return end
+    -- Nameplate compact frames carry the same child; never ours to mirror.
+    local okN, name = pcall(cuf.GetName, cuf)
+    if okN and type(name) == "string" and name:find("^NamePlate") then
+        ns._pingHooked[icon] = false
+        return
+    end
+    local okF, forbidden = pcall(icon.IsForbidden, icon)
+    if not okF or forbidden then
+        ns._pingHooked[icon] = false
+        return
+    end
+    ns._pingHooked[icon] = true
+    hooksecurefunc(icon, "ShowPing", ns._OnCufShowPing)
+    hooksecurefunc(icon, "ClearPing", ns._OnCufClearPing)
+end
+
+if type(CompactUnitFrame_SetUpFrame) == "function" then
+    hooksecurefunc("CompactUnitFrame_SetUpFrame", ns._HookCufPingIcon)
 end
 
 -------------------------------------------------------------------------------
@@ -3927,6 +4280,12 @@ local function UpdateButton(button)
         and Enum.StatusBarInterpolation.ExponentialEaseOut
 
     local health = d.health
+    -- Offline/dead units keep the gray tint _ApplyHealthBg owns. That tint is
+    -- state-stamped there (applied on the transition, not on every call), so a
+    -- full paint must never lay a class color over it -- the same split as
+    -- Blizzard's UpdateHealthColor, which grays those units itself.
+    local connected = UnitIsConnected(unit)
+    local deadOrGhost = UnitIsDeadOrGhost(unit)
     if health then
         local pct = GetSafeHealthPercent(unit)
         health:SetMinMaxValues(0, 100)
@@ -3936,22 +4295,37 @@ local function UpdateButton(button)
             health:SetValue(pct)
         end
 
-        local r, g, b = GetHealthColor(unit, s)
-        local fillTex = health:GetStatusBarTexture()
-        if s.healthColorMode == "dark" then
-            health:SetStatusBarColor(r, g, b, 1)
-            -- 4th return of GetDarkModeFill() is the Dark Mode Fill Opacity.
-            if fillTex then fillTex:SetAlpha(select(4, EllesmereUI.GetDarkModeFill())) end
-        else
-            if fillTex then fillTex:SetAlpha(1) end
-            health:SetStatusBarColor(r, g, b, (s.healthBarOpacity or 100) / 100)
+        if connected and not deadOrGhost then
+            local r, g, b = GetHealthColor(unit, s)
+            local fillTex = health:GetStatusBarTexture()
+            if s.healthColorMode == "dark" then
+                health:SetStatusBarColor(r, g, b, 1)
+                -- 4th return of GetDarkModeFill() is the Dark Mode Fill Opacity.
+                if fillTex then fillTex:SetAlpha(select(4, EllesmereUI.GetDarkModeFill())) end
+            else
+                if fillTex then fillTex:SetAlpha(1) end
+                health:SetStatusBarColor(r, g, b, (s.healthBarOpacity or 100) / 100)
+            end
         end
     end
 
     -- Background (+ dead/offline status tint). Centralized in ns._ApplyHealthBg so the lightweight UNIT_HEALTH path stays in lockstep.
-    ns._ApplyHealthBg(d, health, s, unit)
+    ns._ApplyHealthBg(d, health, s, unit, connected, deadOrGhost)
 
     -- Power (filtered by role + hide if unit has no power)
+    ns._PaintPower(button, d, s, unit)
+
+    -- Absorb
+    UpdateAbsorb(button, unit)
+
+    ns._PaintButtonTail(button, d, s, unit)
+end
+
+-- Power bar layout + value: role-gated show/hide, health-height reflow, then the
+-- value/color push. Split out of UpdateButton so the roster-state refresh
+-- (ns._RefreshRosterState) can re-evaluate the role gate without a full paint.
+-- On ns (200-local cap).
+ns._PaintPower = function(button, d, s, unit)
     local power = d.power
     if power then
         local role = ns._ResolvePowerRole(unit)
@@ -3979,9 +4353,14 @@ local function UpdateButton(button)
         -- content stack mid-fight. Only run the transition when hidePower actually changes, and
         -- defer it to combat end if combat is up; flushed from PLAYER_REGEN_ENABLED alongside
         -- the existing _rosterDirtyInCombat/_sizeTierDirtyInCombat deferrals. nil (fresh occupant,
-        -- see the OnAttributeChanged reset) always applies immediately, never inheriting a stale layout.
+        -- see the OnAttributeChanged reset) applies immediately so a first paint never inherits
+        -- a stale layout -- EXCEPT when the health bar is already protected in combat: aura
+        -- containers born in the secure environment anchor to it, and a mid-pull header
+        -- reassignment (new occupant on a built button) would then write SetHeight under lockdown
+        -- and be blocked. A first paint after a mid-combat reload has nothing anchored yet, so
+        -- IsProtected is false there and it still applies.
         if d._appliedHidePower ~= hidePower then
-            if inCombat and d._appliedHidePower ~= nil then
+            if inCombat and (d._appliedHidePower ~= nil or (d.health and d.health:IsProtected())) then
                 d._powerDirtyInCombat = true
                 ns._powerDirtyInCombat = true
             else
@@ -4019,27 +4398,54 @@ local function UpdateButton(button)
             -- Percent-based, secret-safe (mirrors health). UnitPower/UnitPowerMax can be secret in
             -- group context and cannot feed SetMinMaxValues; UnitPowerPercent evaluates the secret
             -- C-side against ScaleTo100 and returns a clean 0-100.
-            power:SetMinMaxValues(0, 100)
+            -- Type + color + bounds (+ power-colored bg) through the shared edge,
+            -- which stamps d._pwType for the per-tick value path; forced so a
+            -- settings-driven full paint always re-tints.
+            ns._RFPowerTypeEdge(d, unit, true)
             local ppct = UnitPowerPercent(unit, pType, true, CurveConstants.ScaleTo100)
             if smoothPower then
                 power:SetValue(ppct, smoothPower)
             else
                 power:SetValue(ppct)
             end
-            local pr, pg, pb = GetPowerColor(unit)
-            power:SetStatusBarColor(pr, pg, pb, 1)
-            -- Power-colored bg tracks this unit's power color (opt-in; the custom color is applied statically in ReloadFrames).
-            if s.powerBgPowerColored and d.powerBg then
-                local f = EllesmereUI.GetPowerBgDarkenFactor()
-                d.powerBg:SetColorTexture(pr * f, pg * f, pb * f, (s.powerBgDarkness or 70) / 100)
-                d._pwBgTintType = pType
-                d._pwBgTintF = f
-            end
         end
     end
+end
 
-    -- Absorb
-    UpdateAbsorb(button, unit)
+-- Roster-derived state only, for a button whose OCCUPANT did not change across a
+-- roster event: leader/assist flag, assigned role (icon + role-gated power layout).
+-- Everything else on the button is driven by its own unit events and was current
+-- before the roster event, so the full paint (name resolution, absorb, texts,
+-- marker, threat) is skipped. On ns (200-local cap).
+ns._RefreshRosterState = function(button, d, s, unit)
+    if not d.styled then return end
+    ns._UpdateRoleIcon(d, s, unit)
+    ns._UpdateLeaderIcon(d, s, unit)
+    ns._PaintPower(button, d, s, unit)
+end
+
+-- One button's share of the coalesced roster pass (both roster timers). A paint
+-- stamped at or after the cycle's arm time came from the assignment hook (the
+-- occupant changed) or a full pass inside the cycle: nothing left to do. A stable
+-- occupant (same guid as the hook's last full paint) gets the roster-state refresh.
+-- Anything else -- no painted occupant on record, secret guid -- takes the full
+-- paint, exactly the old pass. On ns (200-local cap).
+ns._RosterPassPaint = function(button, unit)
+    local d = GetFFD(button)
+    local armAt = ns._rosterArmAt
+    if armAt and d._fpAt and d._fpAt >= armAt and d._fpUnit == unit then return end
+    local guid = d._lastGuid and UnitGUID(unit)
+    if guid and not issecretvalue(guid) and d._lastGuid == guid and d._lastUnit == unit then
+        local s = d._isParty and ns._scaledPartyProxy or (d._isExtra and ns._scaledExtraProxy) or ns._scaledProfile
+        ns._RefreshRosterState(button, d, s, unit)
+    else
+        UpdateButton(button)
+    end
+end
+
+-- Second half of the full paint (after power + absorb). On ns (200-local cap).
+ns._PaintButtonTail = function(button, d, s, unit)
+    local EllesmereUI = ns.EllesmereUI  -- upvalue read, not a global read (see taint note at top)
 
     -- Name (visibility owned by AnchorNameText, which hides it when the Top Name Bar is enabled)
     if d.nameText then
@@ -4066,12 +4472,18 @@ local function UpdateButton(button)
             local pct = GetSafeHealthPercent(unit)
             d.healthText:SetFormattedText("%.0f%%", pct)
             local htr, htg, htb = GetHealthTextColor(unit, s)
-            d.healthText:SetTextColor(htr, htg, htb, 0.9)
+            if d._htR ~= htr or d._htG ~= htg or d._htB ~= htb then
+                d._htR, d._htG, d._htB = htr, htg, htb
+                d.healthText:SetTextColor(htr, htg, htb, 0.9)
+            end
         elseif mode == "percentNoSign" then
             local pct = GetSafeHealthPercent(unit)
             d.healthText:SetFormattedText("%.0f", pct)
             local htr, htg, htb = GetHealthTextColor(unit, s)
-            d.healthText:SetTextColor(htr, htg, htb, 0.9)
+            if d._htR ~= htr or d._htG ~= htg or d._htB ~= htb then
+                d._htR, d._htG, d._htB = htr, htg, htb
+                d.healthText:SetTextColor(htr, htg, htb, 0.9)
+            end
         elseif mode == "number" then
             local curr = UnitHealth(unit, true)
             if curr and AbbreviateNumbers then
@@ -4080,21 +4492,30 @@ local function UpdateButton(button)
                 d.healthText:SetFormattedText("%s", curr)
             end
             local htr, htg, htb = GetHealthTextColor(unit, s)
-            d.healthText:SetTextColor(htr, htg, htb, 0.9)
+            if d._htR ~= htr or d._htG ~= htg or d._htB ~= htb then
+                d._htR, d._htG, d._htB = htr, htg, htb
+                d.healthText:SetTextColor(htr, htg, htb, 0.9)
+            end
         elseif mode == "numberPercent" then
             local curr = UnitHealth(unit, true)
             local pct = GetSafeHealthPercent(unit)
             local numStr = (curr and AbbreviateNumbers) and AbbreviateNumbers(curr) or tostring(curr or 0)
             d.healthText:SetFormattedText("%s | %.0f%%", numStr, pct)
             local htr, htg, htb = GetHealthTextColor(unit, s)
-            d.healthText:SetTextColor(htr, htg, htb, 0.9)
+            if d._htR ~= htr or d._htG ~= htg or d._htB ~= htb then
+                d._htR, d._htG, d._htB = htr, htg, htb
+                d.healthText:SetTextColor(htr, htg, htb, 0.9)
+            end
         elseif mode == "percentNumber" then
             local curr = UnitHealth(unit, true)
             local pct = GetSafeHealthPercent(unit)
             local numStr = (curr and AbbreviateNumbers) and AbbreviateNumbers(curr) or tostring(curr or 0)
             d.healthText:SetFormattedText("%.0f%% | %s", pct, numStr)
             local htr, htg, htb = GetHealthTextColor(unit, s)
-            d.healthText:SetTextColor(htr, htg, htb, 0.9)
+            if d._htR ~= htr or d._htG ~= htg or d._htB ~= htb then
+                d._htR, d._htG, d._htB = htr, htg, htb
+                d.healthText:SetTextColor(htr, htg, htb, 0.9)
+            end
         elseif mode == "missing" then
             local curr = UnitHealthMissing(unit, true)
             d.healthText:SetText(C_StringUtil.TruncateWhenZero(curr))
@@ -4106,7 +4527,10 @@ local function UpdateButton(button)
                 end
             end
             local htr, htg, htb = GetHealthTextColor(unit, s)
-            d.healthText:SetTextColor(htr, htg, htb, 0.9)
+            if d._htR ~= htr or d._htG ~= htg or d._htB ~= htb then
+                d._htR, d._htG, d._htB = htr, htg, htb
+                d.healthText:SetTextColor(htr, htg, htb, 0.9)
+            end
         else
             d.healthText:SetText("")
         end
@@ -4121,30 +4545,11 @@ local function UpdateButton(button)
         end
     end
 
-    -- Status text (DEAD / OFFLINE / AFK -- always shown, own position/size/color)
-    if d.statusText then
-        local stc = s.statusTextColor or { r = 1, g = 1, b = 1 }
-        if s.statusTextPosition == "none" then
-            d.statusText:Hide()
-        elseif s.showIncomingRez and ns._RFRezShown(unit) then
-            -- Being resurrected: hide status text so the incoming-rez icon (same spot) isn't covered.
-            d.statusText:Hide()
-        elseif not UnitIsConnected(unit) then
-            d.statusText:SetText(EllesmereUI.L("OFFLINE"))
-            d.statusText:SetTextColor(stc.r, stc.g, stc.b)
-            d.statusText:Show()
-        elseif UnitIsDeadOrGhost(unit) then
-            d.statusText:SetText(EllesmereUI.L("DEAD"))
-            d.statusText:SetTextColor(stc.r, stc.g, stc.b)
-            d.statusText:Show()
-        elseif s.statusShowAFK and UnitIsAFK and not issecretvalue(UnitIsAFK(unit)) and UnitIsAFK(unit) then
-            d.statusText:SetText(EllesmereUI.L("AFK"))
-            d.statusText:SetTextColor(stc.r, stc.g, stc.b)
-            d.statusText:Show()
-        else
-            d.statusText:Hide()
-        end
-    end
+    -- Status text (DEAD / OFFLINE / AFK). The SAME stamped painter as the
+    -- UNIT_HEALTH path: the stamp records what is on screen, so a full paint
+    -- that shows DEAD on a freshly assigned corpse leaves a stamp the later
+    -- resurrect tick can see as a transition.
+    ns._PaintStatusText(d, s, unit, UnitIsConnected(unit), UnitIsDeadOrGhost(unit))
 
     -- Role icon
     ns._UpdateRoleIcon(d, s, unit)
@@ -4320,18 +4725,15 @@ local function UpdateReadyCheck(button, unit)
     if s.showReadyCheck and readyCheckActive then
         local status = GetReadyCheckStatus(unit)
         if status == "ready" then
-            tex:SetTexCoord(0, 1, 0, 1)
-            tex:SetTexture("Interface\\RaidFrame\\ReadyCheck-Ready")
+            tex:SetAtlas("UI-LFG-ReadyMark-Raid")
             tex:Show()
             return
         elseif status == "notready" then
-            tex:SetTexCoord(0, 1, 0, 1)
-            tex:SetTexture("Interface\\RaidFrame\\ReadyCheck-NotReady")
+            tex:SetAtlas("UI-LFG-DeclineMark-Raid")
             tex:Show()
             return
         elseif status == "waiting" then
-            tex:SetTexCoord(0, 1, 0, 1)
-            tex:SetTexture("Interface\\RaidFrame\\ReadyCheck-Waiting")
+            tex:SetAtlas("UI-LFG-PendingMark-Raid")
             tex:Show()
             return
         end
@@ -4358,8 +4760,7 @@ local function UpdateReadyCheck(button, unit)
     -- Incoming resurrection (cast in flight, or the latched unaccepted-offer window
     -- -- see ns._RFRezShown). Lowest priority; shows a body is already being picked up.
     if s.showIncomingRez and unit and ns._RFRezShown(unit) then
-        tex:SetTexCoord(0, 1, 0, 1)
-        tex:SetTexture("Interface\\RaidFrame\\Raid-Icon-Rez")
+        tex:SetAtlas("RaidFrame-Icon-Rez")
         tex:Show()
         return
     end
@@ -4383,6 +4784,14 @@ local function RebuildUnitMap()
                 -- Cache class token for power border (avoids UnitClass in hot path)
                 local _, classToken = UnitClass(u)
                 d.classToken = classToken
+                -- Repair a container binding the OnAttributeChanged hook dropped because
+                -- UnitExists(u) was false at the moment the header assigned it (roster still
+                -- streaming in on a zone/group transition). Nothing else re-drives this once
+                -- the header stops re-asserting the same token, so aura containers can stay
+                -- bound to a stale unit indefinitely.
+                if d.rfcUnit ~= u and UnitExists(u) and ns.RFC_OnUnitAssigned then
+                    ns.RFC_OnUnitAssigned(btn, d, u)
+                end
             end
         end
     end
@@ -4582,8 +4991,53 @@ ns.UpdateCombatEventRegistration = function()
 end
 
 -- Lightweight health-only update for UNIT_HEALTH / UNIT_MAXHEALTH. Skips power/name/role/leader/marker/target/threat -- each has its own event path.
-ns._UpdateButtonHealth = function(button)
-    local unit = button:GetAttribute("unit")
+-- Status text (DEAD / OFFLINE / AFK), the ONE painter for both the full paint and
+-- the UNIT_HEALTH path. State + color stamped: text/color/visibility re-apply
+-- only on a real transition (0 hidden, 1 offline, 2 dead, 3 AFK); the stamp is
+-- the on-screen state, so it stays valid across occupants and across the two
+-- paths. The rez check runs only for dead units: a live unit can never carry an
+-- incoming resurrection (the offer latch also requires dead), so the C probe is
+-- skipped for the alive majority -- the same shape as Blizzard's
+-- CompactUnitFrame, which never probes rez from its UNIT_HEALTH path. On ns
+-- (200-local cap).
+ns._PaintStatusText = function(d, s, unit, connected, deadOrGhost)
+    local statusText = d.statusText
+    if not statusText then return end
+    local stc = s.statusTextColor or { r = 1, g = 1, b = 1 }
+    local st
+    if s.statusTextPosition == "none" then
+        st = 0
+    elseif deadOrGhost and s.showIncomingRez and ns._RFRezShown(unit) then
+        -- Being resurrected: hide the status text so the incoming-rez icon isn't covered.
+        st = 0
+    elseif not connected then
+        st = 1
+    elseif deadOrGhost then
+        st = 2
+    else
+        local afk
+        if s.statusShowAFK and UnitIsAFK then
+            afk = UnitIsAFK(unit)
+            if issecretvalue(afk) then afk = nil end
+        end
+        st = afk and 3 or 0
+    end
+    if d._stSt ~= st or d._stR ~= stc.r or d._stG ~= stc.g or d._stB ~= stc.b then
+        d._stSt, d._stR, d._stG, d._stB = st, stc.r, stc.g, stc.b
+        if st == 0 then
+            statusText:Hide()
+        else
+            local L = ns.EllesmereUI.L
+            statusText:SetText(st == 1 and L("OFFLINE") or st == 2 and L("DEAD") or L("AFK"))
+            statusText:SetTextColor(stc.r, stc.g, stc.b)
+            statusText:Show()
+        end
+    end
+end
+
+ns._UpdateButtonHealth = function(button, unit)
+    -- Dispatchers pass the event's unit token; rare callers omit it.
+    unit = unit or button:GetAttribute("unit")
     if not unit or not UnitExists(unit) then return end
     local d = GetFFD(button)
     if not d.styled then return end
@@ -4591,10 +5045,14 @@ ns._UpdateButtonHealth = function(button)
 
     local health = d.health
     local pct = GetSafeHealthPercent(unit)
+    local connected = UnitIsConnected(unit)
+    local deadOrGhost = UnitIsDeadOrGhost(unit)
 
     -- Health bar
     if health then
-        health:SetMinMaxValues(0, 100)
+        -- The bar is always a percent bar; its range never changes after the
+        -- first application.
+        if not d._hb100 then d._hb100 = true; health:SetMinMaxValues(0, 100) end
         local smooth = s.smoothBars and Enum and Enum.StatusBarInterpolation
             and Enum.StatusBarInterpolation.ExponentialEaseOut
         if smooth then
@@ -4602,35 +5060,77 @@ ns._UpdateButtonHealth = function(button)
         else
             health:SetValue(pct)
         end
-        local r, g, b = GetHealthColor(unit, s)
-        local fillTex = health:GetStatusBarTexture()
-        if s.healthColorMode == "dark" then
-            health:SetStatusBarColor(r, g, b, 1)
-            -- 4th return of GetDarkModeFill() is the Dark Mode Fill Opacity.
-            if fillTex then fillTex:SetAlpha(select(4, EllesmereUI.GetDarkModeFill())) end
-        else
-            if fillTex then fillTex:SetAlpha(1) end
-            health:SetStatusBarColor(r, g, b, (s.healthBarOpacity or 100) / 100)
+        -- Fill color: dead/offline ticks skip this entirely (_ApplyHealthBg
+        -- owns the gray tint and clears the stamp on the transition). The
+        -- curve modes recolor with health, so they apply every tick; static
+        -- modes stamp the applied color and re-run only on a real change
+        -- (every static-mode component is a plain value by construction).
+        if connected and not deadOrGhost then
+            local mode = s.healthColorMode
+            local r, g, b
+            if mode == nil or mode == "class" then
+                -- Class color is identity, not health: resolve the class token
+                -- once per occupant and reuse it per tick. Cleared on unit
+                -- assignment, UNIT_NAME_UPDATE and UNIT_CONNECTION -- the edges
+                -- Blizzard's CompactUnitFrame recolors on -- so it can never
+                -- outlive the person behind the token. A secret token (identity
+                -- restricted) is never cached: fail open to the per-tick read
+                -- and the neutral gray, exactly as before.
+                local tok = d._clsTok
+                if not tok then
+                    local _, ct = UnitClass(unit)
+                    if ct and not issecretvalue(ct) then
+                        tok = ct
+                        d._clsTok = ct
+                    end
+                end
+                local cc = tok and ns.EllesmereUI.GetClassColor(tok)
+                if cc then r, g, b = cc.r, cc.g, cc.b else r, g, b = 0.5, 0.5, 0.5 end
+            else
+                r, g, b = GetHealthColor(unit, s)
+            end
+            if mode == "classic" or mode == "customDynamic" or mode == "classReactive" then
+                local fillTex = health:GetStatusBarTexture()
+                if fillTex then fillTex:SetAlpha(1) end
+                health:SetStatusBarColor(r, g, b, (s.healthBarOpacity or 100) / 100)
+            else
+                local a = (mode == "dark") and 1 or (s.healthBarOpacity or 100) / 100
+                if d._hcR ~= r or d._hcG ~= g or d._hcB ~= b or d._hcA ~= a or d._hcM ~= mode then
+                    d._hcR, d._hcG, d._hcB, d._hcA, d._hcM = r, g, b, a, mode
+                    local fillTex = health:GetStatusBarTexture()
+                    if mode == "dark" then
+                        health:SetStatusBarColor(r, g, b, 1)
+                        -- 4th return of GetDarkModeFill() is the Dark Mode Fill Opacity.
+                        if fillTex then fillTex:SetAlpha(select(4, EllesmereUI.GetDarkModeFill())) end
+                    else
+                        if fillTex then fillTex:SetAlpha(1) end
+                        health:SetStatusBarColor(r, g, b, a)
+                    end
+                end
+            end
         end
     end
-
-    -- Absorb (clip frames anchor to fill texture, need visual update)
-    UpdateAbsorb(button, unit)
 
     -- Health text
     if d.healthText then
         local mode = s.healthTextMode or "none"
         -- Hide health text while dead/offline (see UpdateButton; matches preview).
-        if UnitIsDeadOrGhost(unit) or not UnitIsConnected(unit) then
+        if deadOrGhost or not connected then
             d.healthText:SetText("")
         elseif mode == "percent" then
             d.healthText:SetFormattedText("%.0f%%", pct)
             local htr, htg, htb = GetHealthTextColor(unit, s)
-            d.healthText:SetTextColor(htr, htg, htb, 0.9)
+            if d._htR ~= htr or d._htG ~= htg or d._htB ~= htb then
+                d._htR, d._htG, d._htB = htr, htg, htb
+                d.healthText:SetTextColor(htr, htg, htb, 0.9)
+            end
         elseif mode == "percentNoSign" then
             d.healthText:SetFormattedText("%.0f", pct)
             local htr, htg, htb = GetHealthTextColor(unit, s)
-            d.healthText:SetTextColor(htr, htg, htb, 0.9)
+            if d._htR ~= htr or d._htG ~= htg or d._htB ~= htb then
+                d._htR, d._htG, d._htB = htr, htg, htb
+                d.healthText:SetTextColor(htr, htg, htb, 0.9)
+            end
         elseif mode == "number" then
             local curr = UnitHealth(unit, true)
             if curr and AbbreviateNumbers then
@@ -4639,19 +5139,28 @@ ns._UpdateButtonHealth = function(button)
                 d.healthText:SetFormattedText("%s", curr)
             end
             local htr, htg, htb = GetHealthTextColor(unit, s)
-            d.healthText:SetTextColor(htr, htg, htb, 0.9)
+            if d._htR ~= htr or d._htG ~= htg or d._htB ~= htb then
+                d._htR, d._htG, d._htB = htr, htg, htb
+                d.healthText:SetTextColor(htr, htg, htb, 0.9)
+            end
         elseif mode == "numberPercent" then
             local curr = UnitHealth(unit, true)
             local numStr = (curr and AbbreviateNumbers) and AbbreviateNumbers(curr) or tostring(curr or 0)
             d.healthText:SetFormattedText("%s | %.0f%%", numStr, pct)
             local htr, htg, htb = GetHealthTextColor(unit, s)
-            d.healthText:SetTextColor(htr, htg, htb, 0.9)
+            if d._htR ~= htr or d._htG ~= htg or d._htB ~= htb then
+                d._htR, d._htG, d._htB = htr, htg, htb
+                d.healthText:SetTextColor(htr, htg, htb, 0.9)
+            end
         elseif mode == "percentNumber" then
             local curr = UnitHealth(unit, true)
             local numStr = (curr and AbbreviateNumbers) and AbbreviateNumbers(curr) or tostring(curr or 0)
             d.healthText:SetFormattedText("%.0f%% | %s", pct, numStr)
             local htr, htg, htb = GetHealthTextColor(unit, s)
-            d.healthText:SetTextColor(htr, htg, htb, 0.9)
+            if d._htR ~= htr or d._htG ~= htg or d._htB ~= htb then
+                d._htR, d._htG, d._htB = htr, htg, htb
+                d.healthText:SetTextColor(htr, htg, htb, 0.9)
+            end
         elseif mode == "missing" then
             local curr = UnitHealthMissing(unit, true)
             d.healthText:SetText(C_StringUtil.TruncateWhenZero(curr))
@@ -4663,7 +5172,10 @@ ns._UpdateButtonHealth = function(button)
                 end
             end
             local htr, htg, htb = GetHealthTextColor(unit, s)
-            d.healthText:SetTextColor(htr, htg, htb, 0.9)
+            if d._htR ~= htr or d._htG ~= htg or d._htB ~= htb then
+                d._htR, d._htG, d._htB = htr, htg, htb
+                d.healthText:SetTextColor(htr, htg, htb, 0.9)
+            end
         else
             d.healthText:SetText("")
         end
@@ -4671,7 +5183,7 @@ ns._UpdateButtonHealth = function(button)
 
     -- Heal absorb text
     if d.healAbsorbText then
-        if UnitIsDeadOrGhost(unit) or not UnitIsConnected(unit) then
+        if deadOrGhost or not connected then
             d.healAbsorbText:SetText("")
         else
             ns.SetHealAbsorbText(d.healAbsorbText, unit, s)
@@ -4679,32 +5191,11 @@ ns._UpdateButtonHealth = function(button)
     end
 
     -- Status text (dead/ghost state changes with health)
-    if d.statusText then
-        local stc = s.statusTextColor or { r = 1, g = 1, b = 1 }
-        if s.statusTextPosition == "none" then
-            d.statusText:Hide()
-        elseif s.showIncomingRez and ns._RFRezShown(unit) then
-            -- Being resurrected: hide the status text so the incoming-rez icon isn't covered.
-            d.statusText:Hide()
-        elseif not UnitIsConnected(unit) then
-            d.statusText:SetText(EllesmereUI.L("OFFLINE"))
-            d.statusText:SetTextColor(stc.r, stc.g, stc.b)
-            d.statusText:Show()
-        elseif UnitIsDeadOrGhost(unit) then
-            d.statusText:SetText(EllesmereUI.L("DEAD"))
-            d.statusText:SetTextColor(stc.r, stc.g, stc.b)
-            d.statusText:Show()
-        elseif s.statusShowAFK and UnitIsAFK and not issecretvalue(UnitIsAFK(unit)) and UnitIsAFK(unit) then
-            d.statusText:SetText(EllesmereUI.L("AFK"))
-            d.statusText:SetTextColor(stc.r, stc.g, stc.b)
-            d.statusText:Show()
-        else
-            d.statusText:Hide()
-        end
-    end
+    ns._PaintStatusText(d, s, unit, connected, deadOrGhost)
 
-    -- Background + dead/offline tint. This path owns death/resurrect transitions arriving via UNIT_HEALTH, so it restores the bg when alive.
-    ns._ApplyHealthBg(d, health, s, unit)
+    -- Background + dead/offline tint. This path owns death/resurrect transitions
+    -- arriving via UNIT_HEALTH, so it runs per tick (state-stamped inside).
+    ns._ApplyHealthBg(d, health, s, unit, connected, deadOrGhost)
 
     -- Debuff Manager dead-corpse swap rides the same ownership: one field read
     -- for every button without a qualifying config.
@@ -5818,6 +6309,7 @@ XF.Layout = function()
             d.combatIcon:SetSize(cciSz, cciSz)
             if d.AnchorCombatIcon then d.AnchorCombatIcon() end
         end
+        if d.pingFrame then ns._RFAnchorPing(d) end
     end
 end
 
@@ -5826,7 +6318,12 @@ end
 -- unit-payload broadcast events (READY_CHECK_CONFIRM, PLAYER_FLAGS_CHANGED)
 -- are plain registrations filtered in the handler.
 XF.EVENTS = {
-    "UNIT_HEALTH", "UNIT_MAXHEALTH", "UNIT_AURA", "UNIT_POWER_UPDATE",
+    -- UNIT_AURA deliberately absent (Blizzard parity: their CompactUnitFrame
+    -- repaints prediction from health/absorb events only). The one gap -- an
+    -- aura-granted shield expiring on its TIMER on an unhit, topped unit
+    -- (field report: VDH Infernal Strike) fires NO event at all -- is covered
+    -- by the armed-members belt next to the absorb coalescer.
+    "UNIT_HEALTH", "UNIT_MAXHEALTH", "UNIT_POWER_UPDATE", "UNIT_DISPLAYPOWER",
     "UNIT_ABSORB_AMOUNT_CHANGED", "UNIT_HEAL_ABSORB_AMOUNT_CHANGED",
     "UNIT_HEAL_PREDICTION", "UNIT_MAX_HEALTH_MODIFIERS_CHANGED",
     "UNIT_THREAT_LIST_UPDATE", "UNIT_THREAT_SITUATION_UPDATE",
@@ -5863,40 +6360,57 @@ XF.EnsureBuilt = function(count)
         t:SetScript("OnEvent", function(_, event, unit, updateInfo)
             if not b:IsVisible() then return end
             if event == "UNIT_HEALTH" or event == "UNIT_MAXHEALTH" then
-                ns._UpdateButtonHealth(b)
-                if event == "UNIT_MAXHEALTH" then ns._ResettleButtonHealth(b) end
-            elseif event == "UNIT_AURA" then
-                    -- Aura displays are engine containers; only the absorb
-                    -- overlay is event-driven here.
-                    UpdateAbsorb(b, unit)
+                ns._UpdateButtonHealth(b, unit)
+                if event == "UNIT_MAXHEALTH" then
+                    ns._ResettleButtonHealth(b)
+                    -- Max moves the absorb bars' range; value-only health
+                    -- changes touch nothing UpdateAbsorb paints (overlays are
+                    -- clip-anchored; the missing-health clamp edge rides the
+                    -- armed belt / next absorb event instead).
+                    local d = GetFFD(b)
+                    if d._absActive then ns._MarkAbsorbDirty(b, unit) end
+                end
             elseif event == "UNIT_POWER_UPDATE" then
                 local d = GetFFD(b)
                 if d.power and d.power:IsShown() then
-                    local pType = UnitPowerType(unit) or 0
-                    d.power:SetMinMaxValues(0, 100)
-                    d.power:SetValue(UnitPowerPercent(unit, pType, true, CurveConstants.ScaleTo100))
-                    local pr, pg, pb = GetPowerColor(unit)
-                    d.power:SetStatusBarColor(pr, pg, pb, 1)
-                    -- Power-colored bg: retint only when the power type or BG
-                    -- darken changed; the stamps keep the hot path allocation-free.
-                    local s = d._isExtra and ns._scaledExtraProxy or ns._scaledProfile
-                    if s.powerBgPowerColored and d.powerBg then
-                        local f = EllesmereUI.GetPowerBgDarkenFactor()
-                        if d._pwBgTintType ~= pType or d._pwBgTintF ~= f then
-                            d.powerBg:SetColorTexture(pr * f, pg * f, pb * f, (s.powerBgDarkness or 70) / 100)
-                            d._pwBgTintType = pType
-                            d._pwBgTintF = f
-                        end
+                    -- Value only; type/color/bounds ride the UNIT_DISPLAYPOWER
+                    -- edge (see the header dispatcher's branch).
+                    local pType = d._pwType
+                    if pType == nil then
+                        ns._RFPowerTypeEdge(d, unit)
+                        pType = d._pwType
                     end
+                    d.power:SetValue(UnitPowerPercent(unit, pType, true, CurveConstants.ScaleTo100))
+                end
+            elseif event == "UNIT_DISPLAYPOWER" then
+                local d = GetFFD(b)
+                if d.power and d.power:IsShown() then
+                    ns._RFPowerTypeEdge(d, unit)
+                    d.power:SetValue(UnitPowerPercent(unit, d._pwType, true, CurveConstants.ScaleTo100))
                 end
             elseif event == "UNIT_ABSORB_AMOUNT_CHANGED" or event == "UNIT_HEAL_ABSORB_AMOUNT_CHANGED"
                 or event == "UNIT_HEAL_PREDICTION" or event == "UNIT_MAX_HEALTH_MODIFIERS_CHANGED" then
-                UpdateAbsorb(b, unit)
+                -- The event IS the arm: plainly observable even while the
+                -- values are secret. Paint coalesces to once per render frame.
+                -- Prediction is view-gated: with the feature off for this
+                -- button's view the event changes no pixel and must not arm.
+                local dd = GetFFD(b)
+                if event == "UNIT_HEAL_PREDICTION" then
+                    local sv = dd._isParty and ns._scaledPartyProxy
+                        or (dd._isExtra and ns._scaledExtraProxy) or ns._scaledProfile
+                    if sv.healPrediction then
+                        ns._AbArm(b, unit, dd)
+                        ns._MarkAbsorbDirty(b, unit)
+                    end
+                else
+                if event ~= "UNIT_MAX_HEALTH_MODIFIERS_CHANGED" then ns._AbArm(b, unit, dd) end
+                ns._MarkAbsorbDirty(b, unit)
                 if event == "UNIT_HEAL_ABSORB_AMOUNT_CHANGED" then ns.UpdateHealAbsorbTextFor(b, unit) end
                 if event == "UNIT_MAX_HEALTH_MODIFIERS_CHANGED" then
-                    ns._UpdateButtonHealth(b)
+                    ns._UpdateButtonHealth(b, unit)
                     ns._ResettleButtonHealth(b)
                 end
+                end -- prediction view-gate else
             elseif event == "UNIT_THREAT_LIST_UPDATE" or event == "UNIT_THREAT_SITUATION_UPDATE" then
                 local d = GetFFD(b)
                 if d.threatFrame then
@@ -5984,6 +6498,22 @@ function ns.XF_Apply()
             d.classToken = classToken
             b:SetAttribute("unit", unit)
             ns._xfUnitToButton[unit] = b
+            -- Fail-open backstop for a mid-raid reconnect: the roster can still be
+            -- streaming, so UnitName(unit) may be nil at this first paint and the
+            -- slot commits a blank name (field report: blank until /reload even
+            -- though UNIT_NAME_UPDATE and the roster re-apply are both wired).
+            -- Re-arms until the name resolves, bounded, and only repaints while
+            -- this slot still holds the same unit. No-op when the name is cached.
+            if not UnitName(unit) then
+                local tries = 0
+                local function RetryName()
+                    if b:GetAttribute("unit") ~= unit then return end
+                    if UnitName(unit) then UpdateButton(b); return end
+                    tries = tries + 1
+                    if tries < 5 then C_Timer.After(2, RetryName) end
+                end
+                C_Timer.After(2, RetryName)
+            end
             for _, ev in ipairs(XF.EVENTS) do
                 t:RegisterUnitEvent(ev, unit)
             end
@@ -6986,11 +7516,6 @@ local function ReloadFrames(skipButtons)
             btn:SetSize(bw, bh)
         end
 
-        -- Background
-        if d.bg then
-            d.bg:SetColorTexture(ns.GetBgColor(btn:GetAttribute("unit"), s))
-        end
-
         -- Health bar height/anchor + Top Name Bar. The helper reserves the top
         -- bar's height from the top of the health area and styles the bar.
         LayoutTopNameBar(s, bh, powerH, d.health, d.topNameBar, d.topNameBarBg, d.topNameBarText)
@@ -6999,6 +7524,16 @@ local function ReloadFrames(skipButtons)
             d.health:GetStatusBarTexture():SetHorizTile(false)
             -- Re-anchor absorb clips to the new fill texture object
             if d.ReanchorAbsorbToFill then d.ReanchorAbsorbToFill() end
+        end
+
+        -- Background: through its stamped owner (dark-mode aware), AFTER the
+        -- fill texture swap so the anchors bind the new fill edge. Stamps are
+        -- cleared first so the restyle re-applies anchors + color; a direct
+        -- SetColorTexture here is never overwritten by the stamped health tick.
+        if d.bg then
+            d._bgSt, d._bgA = nil, nil
+            local u = btn:GetAttribute("unit")
+            if u and UnitExists(u) then ns._ApplyHealthBg(d, d.health, s, u) end
         end
 
         -- Power bar (always hide here; UpdateButton handles per-role show). This is a
@@ -7084,6 +7619,9 @@ local function ReloadFrames(skipButtons)
             d.combatIcon:SetSize(cciSz, cciSz)
             if d.AnchorCombatIcon then d.AnchorCombatIcon() end
         end
+
+        -- Ping marker size + position (overlay exists only after a first ping)
+        if d.pingFrame then ns._RFAnchorPing(d) end
 
         -- Border
         if d.UpdateBorder then d.UpdateBorder() end
@@ -7792,10 +8330,11 @@ end  -- range fading section (do-block keeps its locals out of the 200-cap)
 
 -------------------------------------------------------------------------------
 --  Ghost aura safety net
---  Throttled 1s ticker clears stale debuff/BM/dispel indicators when a unit
---  goes invisible (loadscreen, out of render range) or disconnects. Without
---  this, indicators painted before the unit ghosted persist indefinitely
---  because UNIT_AURA stops firing for invisible/DC'd units.
+--  Throttled 1s ticker: UNIT_AURA stops firing for invisible/DC'd units and the
+--  render-visibility edge has no event, so a unit that ghosts (loadscreen, out
+--  of render range, disconnect) keeps whatever its containers last parsed. On
+--  regain the containers are re-parsed in place (the same UpdateAllAuras lever
+--  the assist gate uses on its own false->true edge).
 -------------------------------------------------------------------------------
 local ghostTicker = nil
 
@@ -7805,10 +8344,30 @@ local function GhostAuraCheck()
         if not UnitIsVisible(unit) or not UnitIsConnected(unit) then
             if not d.ghostCleared then
                 d.ghostCleared = true
+                -- Binding at ghost time: a reassignment inside the window already
+                -- re-parsed the containers (RFC_OnUnitAssigned), so the regain pass
+                -- skips a button whose binding moved.
+                d.ghostUnit = d.rfcUnit
             end
         else
             if d.ghostCleared then
                 d.ghostCleared = false
+                -- unitToButton only ever gains entries, so unit/btn can be a stale
+                -- pairing: re-parse only containers still bound to this unit.
+                if d.rfcUnit == unit and d.ghostUnit == unit then
+                    if d.rfcDebuffs then d.rfcDebuffs:UpdateAllAuras() end
+                    if d.rfcDispLoc then d.rfcDispLoc:UpdateAllAuras() end
+                    if d.rfcDispel then d.rfcDispel:UpdateAllAuras() end
+                    if d.rfcBm then d.rfcBm:UpdateAllAuras() end
+                    if d.rfcBmChain then
+                        for _, cc in pairs(d.rfcBmChain) do cc:UpdateAllAuras() end
+                    end
+                    if d.rfcBmSimple then d.rfcBmSimple:UpdateAllAuras() end
+                    if d.dmTiles then
+                        for _, c in pairs(d.dmTiles) do c:UpdateAllAuras() end
+                    end
+                end
+                d.ghostUnit = nil
             end
         end
     end
@@ -8014,6 +8573,11 @@ local function OnEvent(self, event, arg1, ...)
                 ns._LayoutPartyFrames()
             end
         end
+        -- Party container geometry deferred by a combat-time _ERF_RefreshAll.
+        if ns._partyGeomDirtyInCombat then
+            ns._partyGeomDirtyInCombat = nil
+            if ns._ApplyPartyContainerGeometry then ns._ApplyPartyContainerGeometry() end
+        end
         -- Flush any power show/hide transitions deferred during combat (see UpdateButton);
         -- only the buttons actually marked dirty get a repaint.
         if ns._powerDirtyInCombat then
@@ -8115,13 +8679,14 @@ local function OnEvent(self, event, arg1, ...)
             -- one next-frame pass reading the storm's FINAL state (same NewTimer(0)
             -- shape as the OOC branch). Paint work is unprotected, so this is combat-safe.
             if not ns._crPaintTimer and (framesVisible or ns._partyFramesVisible) then
+                ns._rosterArmAt = GetTime()
                 ns._crPaintTimer = C_Timer.NewTimer(0, function()
                     ns._crPaintTimer = nil
                     if framesVisible then
                         for _, btn in ipairs(allButtons) do
                             local u = btn:GetAttribute("unit")
                             if u and btn:IsVisible() then
-                                UpdateButton(btn)
+                                ns._RosterPassPaint(btn, u)
                                 ns._UpdateButtonRange(u, btn)
                             end
                         end
@@ -8130,7 +8695,7 @@ local function OnEvent(self, event, arg1, ...)
                         for _, btn in ipairs(ns._partyAllButtons) do
                             local u = btn:GetAttribute("unit")
                             if u and btn:IsVisible() then
-                                UpdateButton(btn)
+                                ns._RosterPassPaint(btn, u)
                                 ns._UpdateButtonRange(u, btn)
                             end
                         end
@@ -8141,6 +8706,10 @@ local function OnEvent(self, event, arg1, ...)
         end
         if ns._rosterUpdateTimer then
             ns._rosterUpdateTimer:Cancel()
+        else
+            -- First event of this cycle: paints stamped at or after this instant
+            -- came from the assignment hook (or a full pass) inside the cycle.
+            ns._rosterArmAt = GetTime()
         end
         ns._rosterUpdateTimer = C_Timer.NewTimer(0, function()
             ns._rosterUpdateTimer = nil
@@ -8169,11 +8738,13 @@ local function OnEvent(self, event, arg1, ...)
                 else
                     -- Already visible, same tier: light refresh only. Aura
                     -- full-rescans are intentionally skipped (hook + UNIT_AURA
-                    -- keep them current); UpdateButton keeps leader/role/health.
+                    -- keep them current); the per-button pass repaints only what
+                    -- the roster can change (see ns._RosterPassPaint).
                     RebuildUnitMap()
                     if ns.UpdatePowerEventRegistration then ns.UpdatePowerEventRegistration() end
                     for _, btn in ipairs(allButtons) do
-                        if btn:IsVisible() and btn:GetAttribute("unit") then UpdateButton(btn) end
+                        local u = btn:GetAttribute("unit")
+                        if u and btn:IsVisible() then ns._RosterPassPaint(btn, u) end
                     end
                     LayoutGroups()
                 end
@@ -8226,7 +8797,7 @@ local function OnEvent(self, event, arg1, ...)
             if hadRez ~= nil and hadRez ~= true and not UnitIsDeadOrGhost(arg1) then
                 ns._rezPend[arg1] = nil
             end
-            ns._UpdateButtonHealth(btn)
+            ns._UpdateButtonHealth(btn, arg1)
             if hadRez then UpdateReadyCheck(btn, arg1) end
         end
     elseif event == "UNIT_MAXHEALTH" then
@@ -8238,8 +8809,12 @@ local function OnEvent(self, event, arg1, ...)
             if hadRez ~= nil and hadRez ~= true and not UnitIsDeadOrGhost(arg1) then
                 ns._rezPend[arg1] = nil
             end
-            ns._UpdateButtonHealth(btn)
+            ns._UpdateButtonHealth(btn, arg1)
             ns._ResettleButtonHealth(btn)
+            -- Max moves the absorb bars' range (see the header dispatcher's
+            -- UNIT_MAXHEALTH branch for the full rationale).
+            local dmx = GetFFD(btn)
+            if dmx._absActive then ns._MarkAbsorbDirty(btn, arg1) end
             if hadRez then UpdateReadyCheck(btn, arg1) end
         end
     elseif event == "UNIT_POWER_UPDATE" then
@@ -8250,45 +8825,57 @@ local function OnEvent(self, event, arg1, ...)
         local btn = unitToButton[arg1] or ns._partyUnitToButton[arg1]
         if btn and GetFFD(btn).power then
             local d = GetFFD(btn)
-            local pType = UnitPowerType(arg1) or 0
-            -- Percent-based, secret-safe (see UpdateButton power block).
-            d.power:SetMinMaxValues(0, 100)
-            d.power:SetValue(UnitPowerPercent(arg1, pType, true, CurveConstants.ScaleTo100))
-            local pr, pg, pb = GetPowerColor(arg1)
-            d.power:SetStatusBarColor(pr, pg, pb, 1)
-            -- Power-colored bg: retint only when the power type or BG darken
-            -- changed; the stamps keep the hot path allocation-free.
-            local s = d._isParty and ns._scaledPartyProxy or ns._scaledProfile
-            if s.powerBgPowerColored and d.powerBg then
-                local f = EllesmereUI.GetPowerBgDarkenFactor()
-                if d._pwBgTintType ~= pType or d._pwBgTintF ~= f then
-                    d.powerBg:SetColorTexture(pr * f, pg * f, pb * f, (s.powerBgDarkness or 70) / 100)
-                    d._pwBgTintType = pType
-                    d._pwBgTintF = f
-                end
+            -- Value only (Blizzard's CompactUnitFrame_UpdatePower shape): type,
+            -- color and bounds belong to the UNIT_DISPLAYPOWER edge below; nil
+            -- = not derived yet for this occupant, derive once.
+            local pType = d._pwType
+            if pType == nil then
+                ns._RFPowerTypeEdge(d, arg1)
+                pType = d._pwType
             end
+            -- Percent-based, secret-safe (see UpdateButton power block).
+            d.power:SetValue(UnitPowerPercent(arg1, pType, true, CurveConstants.ScaleTo100))
         end
-    elseif event == "UNIT_AURA" then
+    elseif event == "UNIT_DISPLAYPOWER" then
+        -- The displayed power type changed (forms, spec swaps, vehicles):
+        -- re-derive type + color + bounds once, then push the value.
         local btn = unitToButton[arg1] or ns._partyUnitToButton[arg1]
-        if btn then
-                -- aura displays are engine-driven containers; the absorb
-                -- overlay (aura-granted shields) is the only consumer left here.
-                UpdateAbsorb(btn, arg1)
+        if btn and GetFFD(btn).power then
+            local d = GetFFD(btn)
+            ns._RFPowerTypeEdge(d, arg1)
+            d.power:SetValue(UnitPowerPercent(arg1, d._pwType, true, CurveConstants.ScaleTo100))
         end
     elseif event == "UNIT_ABSORB_AMOUNT_CHANGED" or event == "UNIT_HEAL_ABSORB_AMOUNT_CHANGED"
         or event == "UNIT_HEAL_PREDICTION" or event == "UNIT_MAX_HEALTH_MODIFIERS_CHANGED" then
         local btn = unitToButton[arg1] or ns._partyUnitToButton[arg1]
         if btn then
-            UpdateAbsorb(btn, arg1)
+            -- The event IS the arm: plainly observable even while the values
+            -- are secret. Paint coalesces to once per render frame.
+            -- Prediction is view-gated: with the feature off for this button's
+            -- view the event changes no pixel and must not arm.
+            local dd = GetFFD(btn)
+            if event == "UNIT_HEAL_PREDICTION" then
+                local sv = dd._isParty and ns._scaledPartyProxy
+                    or (dd._isExtra and ns._scaledExtraProxy) or ns._scaledProfile
+                if sv.healPrediction then
+                    ns._AbArm(btn, arg1, dd)
+                    ns._MarkAbsorbDirty(btn, arg1)
+                end
+            else
+            if event ~= "UNIT_MAX_HEALTH_MODIFIERS_CHANGED" then ns._AbArm(btn, arg1, dd) end
+            ns._MarkAbsorbDirty(btn, arg1)
             if event == "UNIT_HEAL_ABSORB_AMOUNT_CHANGED" then ns.UpdateHealAbsorbTextFor(btn, arg1) end
             if event == "UNIT_MAX_HEALTH_MODIFIERS_CHANGED" then
-                ns._UpdateButtonHealth(btn)
+                ns._UpdateButtonHealth(btn, arg1)
                 ns._ResettleButtonHealth(btn)
             end
+            end -- prediction view-gate else
         end
     elseif event == "UNIT_NAME_UPDATE" then
         local btn = unitToButton[arg1] or ns._partyUnitToButton[arg1]
-        if btn then UpdateButton(btn) end
+        -- The name arriving is also when the class becomes known (Blizzard's
+        -- own comment on this edge): drop the cached class token first.
+        if btn then GetFFD(btn)._clsTok = nil; UpdateButton(btn) end
         -- NAMELIST-driven headers (party Prioritize Class, raid Show Self
         -- First) are built from member names. A member whose name populated
         -- late was unListable when the list was built -- the secure header
@@ -8343,6 +8930,7 @@ local function OnEvent(self, event, arg1, ...)
     elseif event == "PLAYER_FLAGS_CHANGED" or event == "UNIT_CONNECTION" then
         local btn = unitToButton[arg1] or ns._partyUnitToButton[arg1]
         if btn then
+            if event == "UNIT_CONNECTION" then GetFFD(btn)._clsTok = nil end
             UpdateButton(btn)
             -- Connection changes don't fire UNIT_IN_RANGE_UPDATE; re-evaluate
             -- range so offline units take their fixed alpha and reconnecting
@@ -8350,17 +8938,27 @@ local function OnEvent(self, event, arg1, ...)
             if event == "UNIT_CONNECTION" then ns._UpdateButtonRange(arg1, btn) end
         end
     elseif event == "PARTY_MEMBER_ENABLE" or event == "PARTY_MEMBER_DISABLE" then
-        -- Only status text / health color changes (online/offline)
-        if not previewActive then
-            for _, btn in ipairs(allButtons) do
-                local u = btn:GetAttribute("unit")
-                if u and btn:IsVisible() then UpdateButton(btn) end
+        -- Only status text / health color changes (online/offline). The payload
+        -- names the unit: repaint its button(s) alone. The full sweeps remain the
+        -- fallback for a unit no button maps yet (token shape we do not route).
+        local btn = arg1 and (unitToButton[arg1] or ns._partyUnitToButton[arg1])
+        if btn then
+            local pv = GetFFD(btn)._isParty and ns._partyPvActive or previewActive
+            if not pv and btn:IsVisible() then UpdateButton(btn) end
+            local xf = ns._xfUnitToButton[arg1]
+            if xf and not previewActive and xf:IsVisible() then UpdateButton(xf) end
+        else
+            if not previewActive then
+                for _, b in ipairs(allButtons) do
+                    local u = b:GetAttribute("unit")
+                    if u and b:IsVisible() then UpdateButton(b) end
+                end
             end
-        end
-        if not ns._partyPvActive then
-            for _, btn in ipairs(ns._partyAllButtons) do
-                local u = btn:GetAttribute("unit")
-                if u and btn:IsVisible() then UpdateButton(btn) end
+            if not ns._partyPvActive then
+                for _, b in ipairs(ns._partyAllButtons) do
+                    local u = b:GetAttribute("unit")
+                    if u and b:IsVisible() then UpdateButton(b) end
+                end
             end
         end
     elseif event == "RAID_TARGET_UPDATE" then
@@ -8605,6 +9203,7 @@ do
             "roleIconBehindBorder",
             "showRoleForTank", "showRoleForHealer", "showRoleForDPS",
             "showRaidMarker", "raidMarkerSize", "raidMarkerPosition", "raidMarkerOffsetX", "raidMarkerOffsetY",
+            "showPingMarker", "pingMarkerSize", "pingMarkerPosition", "pingMarkerOffsetX", "pingMarkerOffsetY",
             "showReadyCheck", "showSummonPending", "showIncomingRez",
             "readyCheckSize", "readyCheckPosition", "readyCheckOffsetX", "readyCheckOffsetY",
             "statusTextPosition", "statusTextOffsetX", "statusTextOffsetY", "statusTextSize", "statusTextColor",
@@ -8750,7 +9349,7 @@ for _, k in ipairs({
     "nameSize", "healthTextSize", "healAbsorbTextSize", "statusTextSize",
     "debuffStacksTextSize", "debuffDurTextSize", "defDurTextSize",
     -- Icon sizes
-    "roleIconSize", "leaderIconSize", "raidMarkerSize", "combatIndicatorSize",
+    "roleIconSize", "leaderIconSize", "raidMarkerSize", "combatIndicatorSize", "pingMarkerSize",
     "debuffSize", "defSize", "dispellableDebuffSize",
     -- Offsets
     "nameOffsetX", "nameOffsetY",
@@ -8921,6 +9520,9 @@ ns._BumpAbsorbGen = function()
     -- Settings writes also break the same-frame paint-stamp window: a full pass after
     -- an options write must never dedupe against a paint from before the write.
     ns._paintGen = (ns._paintGen or 0) + 1
+    -- Heal-prediction toggles ride this same funnel: re-sync the conditional
+    -- UNIT_HEAL_PREDICTION registrations (idempotent, 45 trackers).
+    if ns._RFSyncPredRegistration then ns._RFSyncPredRegistration() end
 end
 
 -- Compute the party indicator/aura scale (mirrors the raid auto-resize in
@@ -9431,17 +10033,20 @@ ns.ReloadPartyFrames = function(skipButtons)
             btn:SetSize(bw, bh)
         end
 
-        -- Background
-        if d.bg then
-            d.bg:SetColorTexture(ns.GetBgColor(btn:GetAttribute("unit"), raw))
-        end
-
         -- Health bar height/anchor + Top Name Bar (reads party-resolved `raw`)
         LayoutTopNameBar(raw, bh, powerH, d.health, d.topNameBar, d.topNameBarBg, d.topNameBarText)
         if d.health then
             d.health:SetStatusBarTexture(texPath)
             d.health:GetStatusBarTexture():SetHorizTile(false)
             if d.ReanchorAbsorbToFill then d.ReanchorAbsorbToFill() end
+        end
+
+        -- Background: through its stamped owner (dark-mode aware), AFTER the
+        -- fill texture swap (see the raid loop).
+        if d.bg then
+            d._bgSt, d._bgA = nil, nil
+            local u = btn:GetAttribute("unit")
+            if u and UnitExists(u) then ns._ApplyHealthBg(d, d.health, raw, u) end
         end
 
         -- Power bar (always hide here; UpdateButton handles per-role show). This is a
@@ -9529,6 +10134,9 @@ ns.ReloadPartyFrames = function(skipButtons)
             d.combatIcon:SetSize(cciSz, cciSz)
             if d.AnchorCombatIcon then d.AnchorCombatIcon() end
         end
+
+        -- Ping marker
+        if d.pingFrame then ns._RFAnchorPing(d) end
 
         -- Border
         if d.UpdateBorder then d.UpdateBorder() end
@@ -12519,8 +13127,7 @@ local function ApplyPreviewData(f, index)
             if olMode == "fill" then
                 local fillTex = f._health:GetStatusBarTexture()
                 if fillTex then
-                    olTex:SetPoint("TOPLEFT", f._health, "TOPLEFT", 0, 0)
-                    olTex:SetPoint("BOTTOMRIGHT", fillTex, "BOTTOMRIGHT", 0, 0)
+                    olTex:SetAllPoints(fillTex)
                 else
                     olTex:SetAllPoints(f._health)
                 end
@@ -12742,14 +13349,11 @@ local function ApplyPreviewData(f, index)
                 f._readyCheck:SetPoint("CENTER", rcHost, "CENTER", ox, oy)
             end
             if rcStatus == "ready" then
-                f._readyCheck:SetTexture("Interface\\RaidFrame\\ReadyCheck-Ready")
-                f._readyCheck:SetTexCoord(0, 1, 0, 1)
+                f._readyCheck:SetAtlas("UI-LFG-ReadyMark-Raid")
             elseif rcStatus == "notready" then
-                f._readyCheck:SetTexture("Interface\\RaidFrame\\ReadyCheck-NotReady")
-                f._readyCheck:SetTexCoord(0, 1, 0, 1)
+                f._readyCheck:SetAtlas("UI-LFG-DeclineMark-Raid")
             elseif rcStatus == "pending" then
-                f._readyCheck:SetTexture("Interface\\RaidFrame\\ReadyCheck-Waiting")
-                f._readyCheck:SetTexCoord(0, 1, 0, 1)
+                f._readyCheck:SetAtlas("UI-LFG-PendingMark-Raid")
             elseif rcStatus == "summon_pending" then
                 f._readyCheck:SetAtlas("RaidFrame-Icon-SummonPending")
             elseif rcStatus == "summon_accepted" then
@@ -12757,8 +13361,7 @@ local function ApplyPreviewData(f, index)
             elseif rcStatus == "summon_declined" then
                 f._readyCheck:SetAtlas("RaidFrame-Icon-SummonDeclined")
             elseif rcStatus == "rez" then
-                f._readyCheck:SetTexture("Interface\\RaidFrame\\Raid-Icon-Rez")
-                f._readyCheck:SetTexCoord(0, 1, 0, 1)
+                f._readyCheck:SetAtlas("RaidFrame-Icon-Rez")
             end
             f._readyCheck:Show()
         else
@@ -12996,7 +13599,10 @@ local function ApplyPreviewData(f, index)
         else
             f._statusText:SetPoint("CENTER", stHost, "CENTER", stOX, stOY)
         end
-        if isRezCorpse then
+        if stPos == "none" then
+            -- Status text display is turned off
+            f._statusText:Hide()
+        elseif isRezCorpse then
             -- Being resurrected: the rez icon takes this spot, so no DEAD text.
             f._statusText:Hide()
         elseif isDead then
@@ -13009,6 +13615,7 @@ local function ApplyPreviewData(f, index)
             f._statusText:SetText(EllesmereUI.L("AFK"))
             f._statusText:Show()
         else
+            -- No status to show
             f._statusText:Hide()
         end
     end
@@ -13830,6 +14437,8 @@ ns._ShowSizePreview = function(tier)
             health:SetPoint("TOPRIGHT")
             health:SetMinMaxValues(0, 100)
             health:SetValue(100)
+            -- Pre-paint tint (see StyleButton's health bar note).
+            health:SetStatusBarColor(0.12, 0.12, 0.12)
             if PP then PP.DisablePixelSnap(health) end
             f._health = health
 
@@ -14775,6 +15384,33 @@ function ERF:OnEnable()
         drain()
     end)
 
+    -- Party container size + saved position. The container is implicitly
+    -- protected (the secure party header is parented to it), so under combat
+    -- lockdown the write is deferred to the PLAYER_REGEN_ENABLED flush instead
+    -- of tripping ADDON_ACTION_BLOCKED: _ERF_RefreshAll is a public entry point
+    -- (profiles, spec overrides, third-party installers) and not every caller
+    -- is out of combat.
+    function ns._ApplyPartyContainerGeometry()
+        local c = ns._partyContainerFrame
+        if not c or not ns.db then return end
+        if InCombatLockdown() then ns._partyGeomDirtyInCombat = true; return end
+        local s = ns.db.profile
+        local w = s.partyFrameWidth or s.frameWidth or 125
+        local h = s.partyFrameHeight or s.frameHeight or 60
+        local sp = s.cellSpacing or 2
+        c:SetSize(w, h * 5 + sp * 4)
+        local pos = s.partyUnlockPos
+        -- Skip the saved-pos SetPoint when element-anchored with resolved
+        -- geometry: the unlock anchor system owns the position.
+        local anchored = EllesmereUI.IsUnlockAnchored
+            and EllesmereUI.IsUnlockAnchored("RF_PartyFrames")
+            and c:GetLeft()
+        if pos and not anchored then
+            c:ClearAllPoints()
+            c:SetPoint(pos.point, UIParent, pos.relPoint, pos.x, pos.y)
+        end
+    end
+
     -- Profile-swap refresh: EllesmereUI.RefreshAllAddons calls this on a profile
     -- change so raid + party frames re-read the (now-swapped) profile live,
     -- instead of staying stale until /reload. Mirrors the reload sequence above.
@@ -14797,24 +15433,8 @@ function ERF:OnEnable()
         if ns.ApplyFrameStrata then ns.ApplyFrameStrata() end
         -- Raid frames: restyle + relayout + reposition from the new profile.
         if ns.ReloadFrames then ns.ReloadFrames() end
-        -- Party container size + position, then the party buttons.
-        if ns._partyContainerFrame then
-            local s = ns.db.profile
-            local w = s.partyFrameWidth or s.frameWidth or 125
-            local h = s.partyFrameHeight or s.frameHeight or 60
-            local sp = s.cellSpacing or 2
-            ns._partyContainerFrame:SetSize(w, h * 5 + sp * 4)
-            local pos = s.partyUnlockPos
-            -- Skip the saved-pos SetPoint when element-anchored with resolved
-            -- geometry: the unlock anchor system owns the position.
-            local anchored = EllesmereUI.IsUnlockAnchored
-                and EllesmereUI.IsUnlockAnchored("RF_PartyFrames")
-                and ns._partyContainerFrame:GetLeft()
-            if pos and not anchored then
-                ns._partyContainerFrame:ClearAllPoints()
-                ns._partyContainerFrame:SetPoint(pos.point, UIParent, pos.relPoint, pos.x, pos.y)
-            end
-        end
+        -- Party container size + position (combat-deferred inside), then the party buttons.
+        ns._ApplyPartyContainerGeometry()
         if ns.ReloadPartyFrames then ns.ReloadPartyFrames() end
         -- Re-sync per-unit UNIT_POWER_UPDATE registration to the new profile's
         -- power role filters, so units that GAIN power across the swap get live
@@ -14895,12 +15515,41 @@ function ERF:OnEnable()
     eventFrame:RegisterEvent("ENCOUNTER_START")
     eventFrame:RegisterEvent("ENCOUNTER_END")
 
+    -- Heal prediction feeds ONLY the incoming-heal display, never absorbs.
+    -- Any view rendering it keeps the event; the default (all off) never
+    -- registers it at all. Materialized proxies = plain table reads.
+    function ns._RFPredWanted()
+        return (ns._scaledProfile.healPrediction
+            or ns._scaledPartyProxy.healPrediction
+            or ns._scaledExtraProxy.healPrediction) and true or false
+    end
+    -- Idempotent toggle sync, called from the _BumpAbsorbGen options funnel.
+    function ns._RFSyncPredRegistration()
+        local want = ns._RFPredWanted()
+        for unit, tracker in pairs(unitTrackers) do
+            if want then
+                tracker:RegisterUnitEvent("UNIT_HEAL_PREDICTION", unit)
+            else
+                tracker:UnregisterEvent("UNIT_HEAL_PREDICTION")
+            end
+        end
+    end
+
     -- Per-unit event trackers: one frame per unit.
     -- RegisterUnitEvent only accepts 1-2 units per call, so each unit gets
     -- its own frame. Units that don't exist simply don't fire (zero cost).
     local UNIT_EVENTS_BASE = {
-        "UNIT_HEALTH", "UNIT_MAXHEALTH", "UNIT_AURA",
-        "UNIT_ABSORB_AMOUNT_CHANGED", "UNIT_HEAL_ABSORB_AMOUNT_CHANGED", "UNIT_HEAL_PREDICTION",
+        -- UNIT_AURA deliberately absent (Blizzard parity: their CompactUnitFrame
+        -- repaints prediction from health/absorb events only). The one gap --
+        -- an aura-granted shield expiring on its TIMER on an unhit, topped
+        -- unit (field report: VDH Infernal Strike) fires NO event at all --
+        -- is covered by the armed-members belt next to the absorb coalescer.
+        -- UNIT_HEAL_PREDICTION absent: it feeds ONLY the incoming-heal
+        -- display (never absorbs) and fires on every healer cast at every
+        -- target -- registered conditionally in MakeUnitTracker, synced by
+        -- ns._RFSyncPredRegistration on options writes.
+        "UNIT_HEALTH", "UNIT_MAXHEALTH",
+        "UNIT_ABSORB_AMOUNT_CHANGED", "UNIT_HEAL_ABSORB_AMOUNT_CHANGED",
         "UNIT_MAX_HEALTH_MODIFIERS_CHANGED",
         "UNIT_NAME_UPDATE", "UNIT_THREAT_LIST_UPDATE", "UNIT_THREAT_SITUATION_UPDATE",
         "PLAYER_FLAGS_CHANGED", "UNIT_CONNECTION", "UNIT_IN_RANGE_UPDATE",
@@ -14913,7 +15562,11 @@ function ERF:OnEnable()
         for _, ev in ipairs(UNIT_EVENTS_BASE) do
             f:RegisterUnitEvent(ev, unit)
         end
+        if ns._RFPredWanted() then
+            f:RegisterUnitEvent("UNIT_HEAL_PREDICTION", unit)
+        end
         f:RegisterUnitEvent("UNIT_POWER_UPDATE", unit)
+        f:RegisterUnitEvent("UNIT_DISPLAYPOWER", unit)
         f:SetScript("OnEvent", OnEvent)
         unitTrackers[unit] = f
     end
@@ -14962,8 +15615,10 @@ function ERF:OnEnable()
             end
             if wantPower then
                 tracker:RegisterUnitEvent("UNIT_POWER_UPDATE", unit)
+                tracker:RegisterUnitEvent("UNIT_DISPLAYPOWER", unit)
             else
                 tracker:UnregisterEvent("UNIT_POWER_UPDATE")
+                tracker:UnregisterEvent("UNIT_DISPLAYPOWER")
             end
         end
         -- Same cadence as the registrations (roster/roles/settings changes).

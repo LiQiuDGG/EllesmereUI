@@ -244,6 +244,8 @@ spells = {
         [413984] = { class = "EVOKER", disabled = true },
         [369459] = { class = "EVOKER", disabled = true },
         [406732] = { class = "EVOKER", disabled = true },
+        [361021] = { class = "EVOKER", disabled = true },
+        [361022] = { class = "EVOKER", disabled = true },
     },
     offensive = {
         [1249658] = { class = "DEATHKNIGHT", alts = { 152279 } },
@@ -260,6 +262,7 @@ spells = {
         [190319] = { class = "MAGE" },
         [365350] = { class = "MAGE", alts = { 365362 } },
         [1249625] = { class = "MONK" },
+        [31884] = { class = "PALADIN" },
         [10060] = { class = "PRIEST" },
         [114050] = { class = "SHAMAN", alts = { 114051, 114052, 1219480 } },
         [107574] = { class = "WARRIOR" },
